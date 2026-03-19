@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>BLECentral</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.yourcompany.BLECentral</string>
+    <key>CFBundleName</key>
+    <string>BLECentral</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>BLECentral needs Bluetooth access to scan for and connect to BLE peripheral devices.</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>BLECentral connects to BLE peripheral devices for data exchange.</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 BLECentral. All rights reserved.</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSRequiresAquaSystemAppearance</key>
+    <false/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>NSAppShortcutsEnabled</key>
+    <true/>
+    <key>NSAppIntentsUIExtensionEnabled</key>
+    <true/>
+</dict>
+</plist>
