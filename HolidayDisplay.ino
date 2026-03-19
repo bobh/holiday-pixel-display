@@ -18,13 +18,42 @@ If you want, I can also sketch the minimal FRAM read/write routines for that chi
 // ------------------------------------------------------------
 // Effect Enumeration
 // ------------------------------------------------------------
+// Note: values map directly to BLE effect_id characteristic values.
 enum class Effect : uint8_t {
     Fire = 0,
-    Candle,
-    Ember,
-    Sparkle,
-    WarmWhite
+    Candle = 1,
+    Ember = 2,
+    Sparkle = 3,
+    WarmWhite = 4,
+
+    // LOTR-themed effects (Orthanc)
+    LOTR_ColdWhite = 10,
+    LOTR_Palantir = 11,
+    LOTR_ManyColor = 12,
 };
+
+// ------------------------------------------------------------
+// Configuration State
+// ------------------------------------------------------------
+enum ConfigState {
+    UNCONFIGURED,  // No saved FRAM config — Yellow LED, pixels OFF
+    CONFIGURING,   // Central connected, receiving config — Blue LED, pixels preview
+    CONFIGURED     // Config saved and running — Green LED, pixels running
+};
+
+ConfigState state = UNCONFIGURED;
+
+// ------------------------------------------------------------
+// Onboard RGB LED Control (Nano 33 BLE Sense Rev 2)
+// Pins: LED_RED = P0.24, LED_GREEN = P0.16, LED_BLUE = P0.06
+// Logic is active-LOW: LOW = LED on, HIGH = LED off.
+// Pass 0 to turn a channel off, non-zero to turn it on.
+// ------------------------------------------------------------
+void setStatusLED(uint8_t r, uint8_t g, uint8_t b) {
+    digitalWrite(LED_RED,   r == 0 ? HIGH : LOW);
+    digitalWrite(LED_GREEN, g == 0 ? HIGH : LOW);
+    digitalWrite(LED_BLUE,  b == 0 ? HIGH : LOW);
+}
 
 // ------------------------------------------------------------
 // PixelDisplay Class
@@ -45,7 +74,9 @@ public:
           fireFlickerStrength(0.40f),
           fireSlowDriftRate(0.0025f),
           fireDriftPhase(0.0f),
-          globalBrightness(50)
+          globalBrightness(50),
+          primaryColor(0xFFFFFF),
+          secondaryColor(0x000000)
     {
     }
 
@@ -162,6 +193,31 @@ public:
         saveEffectToFram(e);
     }
 
+    void setBrightness(uint8_t b)
+    {
+        globalBrightness = b;
+    }
+
+    void setSpeed(uint8_t speed)
+    {
+        // Map a 0-255 speed value to a reasonable update interval (ms)
+        // Lower speed -> slower update; higher speed -> faster updates.
+        // Keep it within a sane range (10ms - 200ms).
+        const uint16_t minMs = 10;
+        const uint16_t maxMs = 200;
+        frameIntervalMs = minMs + ((uint16_t)(255 - speed) * (maxMs - minMs)) / 255;
+    }
+
+    void setPrimaryColor(uint32_t rgb)
+    {
+        primaryColor = rgb;
+    }
+
+    void setSecondaryColor(uint32_t rgb)
+    {
+        secondaryColor = rgb;
+    }
+
     Effect getEffect() const
     {
         return currentEffect;
@@ -174,7 +230,7 @@ private:
 
     Effect currentEffect;
     unsigned long lastUpdate;
-    const unsigned long frameIntervalMs;
+    unsigned long frameIntervalMs;
 
     // Fire effect parameters (internal only)
     uint8_t fireBaseRed;
@@ -185,6 +241,10 @@ private:
 
     // Global brightness for all effects (0–255)
     uint8_t globalBrightness;
+
+    // Primary/secondary colors (RGB, no white)
+    uint32_t primaryColor;
+    uint32_t secondaryColor;
 
     // FRAM address for effect ID (stubbed)
     static constexpr uint16_t FRAM_EFFECT_ADDR = 0x0000;
@@ -239,7 +299,7 @@ private:
     bool isValidEffect(Effect e)
     {
         uint8_t v = static_cast<uint8_t>(e);
-        return v <= static_cast<uint8_t>(Effect::WarmWhite);
+        return v <= static_cast<uint8_t>(Effect::LOTR_ManyColor);
     }
 };
 
@@ -253,10 +313,30 @@ PixelDisplay display(3, 8);
 // ------------------------------------------------------------
 void setup()
 {
-    display.begin();
+    // Initialize onboard RGB LED pins (active-LOW)
+    pinMode(LED_RED,   OUTPUT);
+    pinMode(LED_GREEN, OUTPUT);
+    pinMode(LED_BLUE,  OUTPUT);
 
-    // For this test harness, explicitly set Fire effect
-    display.setEffect(Effect::Fire);
+    // Start with all LEDs off before state is determined
+    setStatusLED(0, 0, 0);
+
+    display.begin();  // Clears and blanks SK6812 pixels
+
+    // Check FRAM for a previously saved configuration.
+    // framHasValidConfig() / loadConfigFromFRAM() are defined in BLEPeripheral.ino.
+    if (framHasValidConfig()) {
+        loadConfigFromFRAM();          // Populates gConfig from FRAM
+        state = CONFIGURED;
+        setStatusLED(0, 255, 0);       // GREEN — configured
+        // display.update() in loop() will start running the loaded effect
+    } else {
+        state = UNCONFIGURED;
+        setStatusLED(255, 255, 0);     // YELLOW — unconfigured
+        // SK6812 pixels remain OFF; loop() skips display.update() while UNCONFIGURED
+    }
+
+    setupBLE();
 }
 
 // ------------------------------------------------------------
@@ -264,6 +344,10 @@ void setup()
 // ------------------------------------------------------------
 void loop()
 {
-    display.update();
-    // No delay here; frame pacing is handled inside the class
+    // Only drive SK6812 pixels when a config is active (CONFIGURING = preview,
+    // CONFIGURED = running saved effect). UNCONFIGURED keeps pixels OFF.
+    if (state != UNCONFIGURED) {
+        display.update();
+    }
+    updateBLE();
 }
