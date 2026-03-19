@@ -325,7 +325,7 @@ extension BLEManager: CBCentralManagerDelegate {
         Task { @MainActor in
             // Parse manufacturer data (per protocol v0.1 Section 5)
             guard let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
-                  mfgData.count >= 9 else { return }
+                  mfgData.count >= 8 else { return }
 
             let companyID = UInt16(mfgData[0]) | (UInt16(mfgData[1]) << 8)
             guard companyID == 0xFFFF else { return }
