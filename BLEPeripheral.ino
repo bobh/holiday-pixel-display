@@ -76,10 +76,12 @@ void setupBLE() {
     return;
   }
 
-  // Local name encodes Board ID per protocol §5
-  char localName[16];
-  snprintf(localName, sizeof(localName), "Orth-%02d", BOARD_ID);
-  BLE.setLocalName(localName);
+  // NOTE: Local name omitted intentionally — with a 128-bit service UUID +
+  // 8-byte manufacturer data, the advertisement is already at the 31-byte BLE
+  // limit. Adding a local name overflows the packet and causes ArduinoBLE to
+  // silently drop the service UUID, making the peripheral invisible to iOS
+  // service-filtered scanning.  Board identity is available via manufacturer
+  // data bytes and the device_info characteristic after connection.
   BLE.setAdvertisedService(holidayService);
 
   // Manufacturer Specific Data for pre-connection identification (Protocol §5)
@@ -152,6 +154,7 @@ void updateBLE() {
       setStatusLED(255, 255, 0); // YELLOW — disconnected without saving
       updateAdvertisingState(0x00);
     }
+    BLE.setAdvertisedService(holidayService);
     BLE.advertise();
     return;
   }
