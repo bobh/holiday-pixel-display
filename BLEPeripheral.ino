@@ -1,4 +1,5 @@
 #include <ArduinoBLE.h>
+#include <Wire.h>
 
 // ------------------------------------------------------------
 // BLE Service / Characteristic UUIDs (Holiday Display Control)
@@ -147,11 +148,21 @@ void updateBLE() {
   if (!central && wasConnected) {
     wasConnected = false;
     if (state == CONFIGURED) {
-      setStatusLED(0, 255, 0); // GREEN — config was saved, keep running
+      // Config was saved this session — keep running it.
+      setStatusLED(0, 255, 0); // GREEN
+      updateAdvertisingState(0x01);
+    } else if (framHasValidConfig()) {
+      // Disconnected without saving but a prior config exists in FRAM.
+      // Revert to it so pixels keep running and LED stays green.
+      Wire.begin();
+      loadConfigFromFRAM();
+      state = CONFIGURED;
+      setStatusLED(0, 255, 0); // GREEN — reverted to saved config
       updateAdvertisingState(0x01);
     } else {
+      // No saved config at all — go dark.
       state = UNCONFIGURED;
-      setStatusLED(255, 255, 0); // YELLOW — disconnected without saving
+      setStatusLED(255, 255, 0); // YELLOW
       updateAdvertisingState(0x00);
     }
     BLE.setAdvertisedService(holidayService);
@@ -281,24 +292,58 @@ static void notifyBattery() {
   charBattery.writeValue((uint8_t*)&batteryMv, 2);
 }
 
-static void saveConfig() {
-  // Persist to FRAM / flash in the future.
-  // Currently a stub.
-  (void)gConfig;
+// ------------------------------------------------------------
+// FRAM persistence — FM24CL16B at I2C address 0x50
+// Layout:
+//   0x0000        : magic byte (0xA5 = valid config present)
+//   0x0001–0x000D : DisplayConfig struct (13 bytes)
+// Magic is written AFTER config so a power failure mid-write
+// leaves framHasValidConfig() returning false rather than
+// loading a partially-written struct.
+// ------------------------------------------------------------
+static const uint8_t  FRAM_I2C_ADDR   = 0x50;
+static const uint16_t FRAM_MAGIC_ADDR  = 0x0000;
+static const uint16_t FRAM_CONFIG_ADDR = 0x0001;
+static const uint8_t  FRAM_MAGIC_BYTE  = 0xA5;
+
+static bool framWrite(uint16_t addr, const uint8_t* data, uint8_t len) {
+  Wire.beginTransmission(FRAM_I2C_ADDR);
+  Wire.write((addr >> 8) & 0xFF);
+  Wire.write(addr & 0xFF);
+  Wire.write(data, len);
+  return Wire.endTransmission() == 0;
 }
 
-// Returns true if FRAM contains a previously saved DisplayConfig.
-// Stubbed: always returns false until FRAM hardware is available.
+static bool framRead(uint16_t addr, uint8_t* data, uint8_t len) {
+  Wire.beginTransmission(FRAM_I2C_ADDR);
+  Wire.write((addr >> 8) & 0xFF);
+  Wire.write(addr & 0xFF);
+  if (Wire.endTransmission(false) != 0) return false;
+  Wire.requestFrom(FRAM_I2C_ADDR, len);
+  for (uint8_t i = 0; i < len; i++) {
+    if (!Wire.available()) return false;
+    data[i] = Wire.read();
+  }
+  return true;
+}
+
 bool framHasValidConfig() {
-  return false;
+  uint8_t magic = 0;
+  if (!framRead(FRAM_MAGIC_ADDR, &magic, 1)) return false;
+  return magic == FRAM_MAGIC_BYTE;
 }
 
-// Loads DisplayConfig from FRAM into gConfig and applies it to the display.
-// Stubbed: no-op until FRAM hardware is available.
 void loadConfigFromFRAM() {
-  // In a real implementation:
-  //  - Read sizeof(DisplayConfig) bytes from FRAM starting at address 0x0000
-  //  - Copy into gConfig
-  //  - Call applyConfig()
-  (void)gConfig;
+  if (!framRead(FRAM_CONFIG_ADDR, (uint8_t*)&gConfig, (uint8_t)sizeof(gConfig))) return;
+  applyConfig();
+}
+
+static void saveConfig() {
+  // Re-initialize Wire before FRAM access. On NRF52840, BLE.begin() can
+  // leave the I2C peripheral in a state that silently drops transactions.
+  // Calling Wire.begin() here is safe — it reinitializes without side effects.
+  Wire.begin();
+  framWrite(FRAM_CONFIG_ADDR, (uint8_t*)&gConfig, (uint8_t)sizeof(gConfig));
+  uint8_t magic = FRAM_MAGIC_BYTE;
+  framWrite(FRAM_MAGIC_ADDR, &magic, 1);
 }

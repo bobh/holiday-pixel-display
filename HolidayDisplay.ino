@@ -178,7 +178,21 @@ public:
 
             case Effect::WarmWhite:
             {
-                // Placeholder for future warm-white calibration effect
+                // Slow sine-wave breathing: 4-second period.
+                // W channel dominant — first effect to exercise the white LED.
+                float phase  = (millis() % 4000) / 4000.0f;
+                float breath = (sinf(phase * 2.0f * PI - PI / 2.0f) + 1.0f) * 0.5f; // 0.0–1.0
+
+                uint8_t w = static_cast<uint8_t>(breath * 220); // W dominant
+                uint8_t r = static_cast<uint8_t>(breath * 35);  // slight warm tint
+
+                RgbwColor color(r, 0, 0, w);
+                RgbwColor scaled = scaleBrightness(color);
+
+                for (uint16_t i = 0; i < ledCount; i++) {
+                    strip.SetPixelColor(i, scaled);
+                }
+                strip.Show();
                 break;
             }
         }
