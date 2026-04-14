@@ -287,9 +287,13 @@ static void applyConfig() {
 }
 
 static void notifyBattery() {
-  // Placeholder implementation: report 0 unless we have a real sensor.
-  uint16_t batteryMv = 0;
-  charBattery.writeValue((uint8_t*)&batteryMv, 2);
+  // Send one-shot notification only on power status transitions.
+  // currentPowerStatus and powerStatusChanged are owned by HolidayDisplay.ino.
+  // Voltage values never leave the Arduino — iPhone receives the status code only.
+  if (!powerStatusChanged) return;
+  powerStatusChanged = false;
+  uint8_t data[2] = { static_cast<uint8_t>(currentPowerStatus), 0x00 };
+  charBattery.writeValue(data, 2);
 }
 
 // ------------------------------------------------------------

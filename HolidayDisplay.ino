@@ -44,12 +44,54 @@ enum ConfigState {
 ConfigState state = UNCONFIGURED;
 
 // ------------------------------------------------------------
+// Power Status — shared with BLEPeripheral.ino for BLE notify
+// Arduino owns all voltage decisions; iPhone receives code only.
+// ------------------------------------------------------------
+enum class PowerStatus : uint8_t {
+    OK              = 0x00,  // Battery healthy
+    BATTERY_WARNING = 0x01,  // TTE ≤ 5 min or Vbatt ≤ 3.2V
+    BATTERY_CUTOFF  = 0x02,  // Vbatt ≤ 3.0V — boost disabled (latched)
+    HARDWARE_FAULT  = 0x03,  // AC rail present but degraded
+    ON_AC           = 0x04,  // AC rail healthy — battery monitoring suspended
+};
+
+PowerStatus currentPowerStatus = PowerStatus::OK;
+bool        powerStatusChanged  = false;  // set on transition; cleared by notifyBattery()
+
+// ------------------------------------------------------------
+// Power Management — pins, thresholds, state
+// ------------------------------------------------------------
+static const uint8_t  PIN_BOOST_EN      = 5;          // D5: TPS61023 EN, HIGH=on (confirmed)
+static const uint32_t POWER_SAMPLE_MS   = 15000UL;    // 15-second sample interval
+static const float    VBATT_CUTOFF      = 3.00f;      // Hard cutoff (V)
+static const float    VBATT_WARNING     = 3.20f;      // Soft warning threshold (V)
+static const float    VRAIL_PRESENT_V   = 1.60f;      // VA1 > 1.60V → Vrail > 3.2V = AC present
+static const float    VRAIL_HEALTHY_V   = 2.25f;      // VA1 > 2.25V → Vrail > 4.5V = AC healthy
+static const float    TTE_WARNING_SECS  = 300.0f;     // 5-minute Time-To-Empty warning
+static const uint8_t  REGRESSION_N      = 5;          // Sliding window sample count
+static const float    ADC_TO_VOLTS      = (3.3f / 4095.0f) * 2.0f; // 12-bit, ÷2 divider
+
+static float          vHistory[REGRESSION_N] = {};
+static uint8_t        vHistoryCount           = 0;    // 0–5; full at 5
+static unsigned long  lastPowerSample          = 0;
+static bool           cutoffLatched            = false;
+static bool           ledLocked                = false; // true = battery state owns LED
+
+// Non-blocking blink state for BATTERY_WARNING
+static unsigned long  blinkLast = 0;
+static bool           blinkOn   = false;
+static const uint32_t BLINK_ON  = 100;   // ms — short pulse (low power)
+static const uint32_t BLINK_OFF = 900;   // ms
+
+// ------------------------------------------------------------
 // Onboard RGB LED Control (Nano 33 BLE Sense Rev 2)
 // Pins: LED_RED = P0.24, LED_GREEN = P0.16, LED_BLUE = P0.06
 // Logic is active-LOW: LOW = LED on, HIGH = LED off.
-// Pass 0 to turn a channel off, non-zero to turn it on.
+// ledLocked = true when battery WARNING/CUTOFF owns the LED;
+// BLE state changes are ignored to prevent override.
 // ------------------------------------------------------------
 void setStatusLED(uint8_t r, uint8_t g, uint8_t b) {
+    if (ledLocked) return;
     digitalWrite(LED_RED,   r == 0 ? HIGH : LOW);
     digitalWrite(LED_GREEN, g == 0 ? HIGH : LOW);
     digitalWrite(LED_BLUE,  b == 0 ? HIGH : LOW);
@@ -323,6 +365,142 @@ private:
 PixelDisplay display(3, 8);
 
 // ------------------------------------------------------------
+// Power Management Functions
+// ------------------------------------------------------------
+
+static float adcToVolts(uint8_t pin) {
+    return analogRead(pin) * ADC_TO_VOLTS;
+}
+
+// 5-sample least-squares linear regression.
+// Returns TTE in seconds, or -1 if window not full or voltage not falling.
+static float computeTTE() {
+    if (vHistoryCount < REGRESSION_N) return -1.0f;
+    // x = {0, 15, 30, 45, 60}s — fixed, precomputed:
+    // sum_x = 150, sum_x2 = 6750, denom = n*sum_x2 - sum_x^2 = 11250
+    float sum_y = 0.0f, sum_xy = 0.0f;
+    for (uint8_t i = 0; i < REGRESSION_N; i++) {
+        float xi = i * 15.0f;
+        sum_y  += vHistory[i];
+        sum_xy += xi * vHistory[i];
+    }
+    float m = (REGRESSION_N * sum_xy - 150.0f * sum_y) / 11250.0f;
+    if (m >= 0.0f) return -1.0f;  // flat or rising — no TTE
+    return (VBATT_CUTOFF - vHistory[REGRESSION_N - 1]) / m;
+}
+
+static void setPowerStatus(PowerStatus s) {
+    if (s != currentPowerStatus) {
+        currentPowerStatus = s;
+        powerStatusChanged = true;
+    }
+}
+
+void setupPower() {
+    analogReadResolution(12);
+    pinMode(PIN_BOOST_EN, OUTPUT);
+    digitalWrite(PIN_BOOST_EN, HIGH);  // EN=HIGH: boost converter ON at startup
+}
+
+void updatePower() {
+    unsigned long now = millis();
+
+    // WARNING blink runs every loop() call — not gated by sample interval.
+    // Uses direct digitalWrite to bypass ledLocked check (battery owns LED here).
+    if (currentPowerStatus == PowerStatus::BATTERY_WARNING) {
+        unsigned long elapsed = now - blinkLast;
+        if (blinkOn && elapsed >= BLINK_ON) {
+            digitalWrite(LED_RED, HIGH);  // OFF (active low)
+            blinkOn   = false;
+            blinkLast = now;
+        } else if (!blinkOn && elapsed >= BLINK_OFF) {
+            digitalWrite(LED_RED, LOW);   // ON (active low)
+            blinkOn   = true;
+            blinkLast = now;
+        }
+    }
+
+    // All voltage sampling is gated to every 15 seconds
+    if (now - lastPowerSample < POWER_SAMPLE_MS) return;
+    lastPowerSample = now;
+
+    float vrail = adcToVolts(A1);
+    float vbatt = adcToVolts(A0);
+
+    // --- AC rail check takes priority over battery state machine ---
+    if (vrail > VRAIL_PRESENT_V) {
+        digitalWrite(PIN_BOOST_EN, LOW);  // Disable boost — LiPo quiescent drain removed
+        ledLocked     = false;            // Restore BLE config-state LED
+        vHistoryCount = 0;                // Reset regression window
+        if (vrail >= VRAIL_HEALTHY_V) {
+            setPowerStatus(PowerStatus::ON_AC);
+        } else {
+            setPowerStatus(PowerStatus::HARDWARE_FAULT);  // Rail present but degraded
+        }
+        return;
+    }
+
+    // --- AC absent: battery monitoring active ---
+
+    // Transition from AC back to battery: re-enable boost unless cutoff latched
+    bool wasOnAc = (currentPowerStatus == PowerStatus::ON_AC ||
+                    currentPowerStatus == PowerStatus::HARDWARE_FAULT);
+    if (wasOnAc && !cutoffLatched) {
+        digitalWrite(PIN_BOOST_EN, HIGH);
+        vHistoryCount = 0;  // Restart regression warmup
+    }
+
+    // Cutoff latch is permanent until hardware reset
+    if (cutoffLatched) {
+        setPowerStatus(PowerStatus::BATTERY_CUTOFF);
+        return;
+    }
+
+    // Hard cutoff: disable boost, lock LED solid RED, latch forever
+    if (vbatt <= VBATT_CUTOFF) {
+        digitalWrite(PIN_BOOST_EN, LOW);
+        // Set solid RED directly before engaging ledLocked
+        digitalWrite(LED_RED,   LOW);   // ON
+        digitalWrite(LED_GREEN, HIGH);  // OFF
+        digitalWrite(LED_BLUE,  HIGH);  // OFF
+        ledLocked     = true;
+        cutoffLatched = true;
+        setPowerStatus(PowerStatus::BATTERY_CUTOFF);
+        return;
+    }
+
+    // Add voltage sample to sliding window
+    if (vHistoryCount < REGRESSION_N) {
+        vHistory[vHistoryCount++] = vbatt;
+    } else {
+        for (uint8_t i = 0; i < REGRESSION_N - 1; i++) vHistory[i] = vHistory[i + 1];
+        vHistory[REGRESSION_N - 1] = vbatt;
+    }
+
+    // Warning: TTE ≤ 5 min OR voltage at soft threshold
+    float tte       = computeTTE();
+    bool  warnTTE   = (tte > 0.0f && tte <= TTE_WARNING_SECS);
+    bool  warnVolt  = (vbatt <= VBATT_WARNING);
+
+    if (warnTTE || warnVolt) {
+        if (currentPowerStatus != PowerStatus::BATTERY_WARNING) {
+            // First entry into WARNING: start blink, lock LED
+            ledLocked = true;
+            blinkOn   = true;
+            blinkLast = now;
+            digitalWrite(LED_RED, LOW);  // RED on to start pulse
+        }
+        setPowerStatus(PowerStatus::BATTERY_WARNING);
+    } else {
+        if (currentPowerStatus == PowerStatus::BATTERY_WARNING) {
+            // Exiting WARNING (voltage recovered): restore BLE LED
+            ledLocked = false;
+        }
+        setPowerStatus(PowerStatus::OK);
+    }
+}
+
+// ------------------------------------------------------------
 // Arduino Setup
 // ------------------------------------------------------------
 void setup()
@@ -351,6 +529,7 @@ void setup()
     }
 
     setupBLE();
+    setupPower();  // Configure ADC resolution and D5 boost enable
 }
 
 // ------------------------------------------------------------
@@ -364,4 +543,5 @@ void loop()
         display.update();
     }
     updateBLE();
+    updatePower();  // Non-blocking: blink runs every call, sampling every 15s
 }
