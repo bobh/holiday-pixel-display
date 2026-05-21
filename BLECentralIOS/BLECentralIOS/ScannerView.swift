@@ -32,7 +32,9 @@ struct ScannerView: View {
         // 15-second delay allows peripherals to boot and begin advertising
         .task {
             try? await Task.sleep(for: .seconds(15))
-            bleManager.startScanning()
+            if !bleManager.isScanning && bleManager.discoveredBoards.isEmpty && !bleManager.isConnected {
+                bleManager.startScanning()
+            }
         }
     }
 
@@ -95,6 +97,11 @@ struct BoardRowView: View {
             Text("Signal: \(board.rssi) dBm")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+            if board.advertisedBoardID != board.boardID {
+                Text("UUID: \(board.shortUUID) | Advertises Board \(board.advertisedBoardID)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(.vertical, 2)
     }

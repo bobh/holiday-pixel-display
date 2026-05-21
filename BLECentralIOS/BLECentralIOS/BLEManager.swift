@@ -84,7 +84,8 @@ enum ConfigStatus: UInt8 {
 struct DiscoveredBoard: Identifiable, Hashable {
     let id: UUID            // = peripheral.identifier
     let peripheral: CBPeripheral
-    let boardID: UInt8
+    let boardID: UInt8      // UI board number, resolved from advertised ID + peripheral UUID
+    let advertisedBoardID: UInt8
     let deviceType: DeviceType
     let firmwareVersion: String
     let pixelCount: UInt8
@@ -101,6 +102,10 @@ struct DiscoveredBoard: Identifiable, Hashable {
 
     var detailText: String {
         "\(deviceType.name) | FW v\(firmwareVersion) | \(pixelCount) pixels"
+    }
+
+    var shortUUID: String {
+        String(id.uuidString.prefix(8))
     }
 }
 
@@ -159,6 +164,7 @@ final class BLEManager: NSObject {
     var primaryColor: Color = .white
     var secondaryColor: Color = .black
     var batteryMv: UInt16 = 0
+    var isSavingConfig = false
 
     // MARK: - BLE Properties
     private var centralManager: CBCentralManager!
@@ -175,10 +181,14 @@ final class BLEManager: NSObject {
     private var charSaveConfig: CBCharacteristic?
     private var charDeviceInfo: CBCharacteristic?
     private var charBattery: CBCharacteristic?
+    private var disconnectAfterSaveAck = false
+    private let boardNumberAliasesKey = "HolidayDisplay.boardNumberAliases.v1"
+    private var boardNumberByPeripheralID: [UUID: UInt8] = [:]
 
     // MARK: - Initialization
     override init() {
         super.init()
+        loadBoardNumberAliases()
         centralManager = CBCentralManager(delegate: self, queue: nil)
     }
 
@@ -189,8 +199,9 @@ final class BLEManager: NSObject {
             connectionStatus = "Bluetooth not ready"
             return
         }
-        discoveredBoards = []
-        connectionStatus = "Scanning for Holiday Display boards..."
+        connectionStatus = discoveredBoards.isEmpty
+            ? "Scanning for Holiday Display boards..."
+            : "Scanning — showing \(discoveredBoards.count) known board(s)"
         isScanning = true
         centralManager.scanForPeripherals(withServices: [HolidayBLE.serviceUUID], options: nil)
     }
@@ -295,6 +306,61 @@ final class BLEManager: NSObject {
         charSaveConfig = nil
         charDeviceInfo = nil
         charBattery = nil
+        isSavingConfig = false
+        disconnectAfterSaveAck = false
+    }
+
+    private func displayBoardID(for peripheralID: UUID, advertisedBoardID: UInt8) -> UInt8 {
+        if let existing = boardNumberByPeripheralID[peripheralID] {
+            if existing != advertisedBoardID && !isBoardNumberAssigned(advertisedBoardID, excluding: peripheralID) {
+                boardNumberByPeripheralID[peripheralID] = advertisedBoardID
+                saveBoardNumberAliases()
+                return advertisedBoardID
+            }
+            return existing
+        }
+
+        if !isBoardNumberAssigned(advertisedBoardID, excluding: peripheralID) {
+            boardNumberByPeripheralID[peripheralID] = advertisedBoardID
+            saveBoardNumberAliases()
+            return advertisedBoardID
+        }
+
+        for candidate in 1...99 {
+            let boardNumber = UInt8(candidate)
+            if !isBoardNumberAssigned(boardNumber, excluding: peripheralID) {
+                boardNumberByPeripheralID[peripheralID] = boardNumber
+                saveBoardNumberAliases()
+                return boardNumber
+            }
+        }
+
+        return advertisedBoardID
+    }
+
+    private func isBoardNumberAssigned(_ boardNumber: UInt8, excluding peripheralID: UUID) -> Bool {
+        boardNumberByPeripheralID.contains { item in
+            item.key != peripheralID && item.value == boardNumber
+        }
+    }
+
+    private func loadBoardNumberAliases() {
+        guard let saved = UserDefaults.standard.dictionary(forKey: boardNumberAliasesKey) as? [String: Int] else {
+            return
+        }
+
+        boardNumberByPeripheralID = saved.reduce(into: [:]) { result, item in
+            guard let uuid = UUID(uuidString: item.key),
+                  (0...99).contains(item.value) else { return }
+            result[uuid] = UInt8(item.value)
+        }
+    }
+
+    private func saveBoardNumberAliases() {
+        let saved = boardNumberByPeripheralID.reduce(into: [String: Int]()) { result, item in
+            result[item.key.uuidString] = Int(item.value)
+        }
+        UserDefaults.standard.set(saved, forKey: boardNumberAliasesKey)
     }
 }
 
@@ -330,7 +396,7 @@ extension BLEManager: CBCentralManagerDelegate {
             let companyID = UInt16(mfgData[0]) | (UInt16(mfgData[1]) << 8)
             guard companyID == 0xFFFF else { return }
 
-            let bid       = mfgData[2]
+            let advertisedBoardID = mfgData[2]
             let dtype     = DeviceType(rawValue: mfgData[3]) ?? .unknown
             let fwMajor   = mfgData[4] >> 4
             let fwMinor   = mfgData[4] & 0x0F
@@ -338,11 +404,13 @@ extension BLEManager: CBCentralManagerDelegate {
             let caps      = CapabilityFlags(rawValue: mfgData[6])
             // Byte 7: config state (was Reserved 0x00 — old firmware treated as unconfigured)
             let cfgStatus = ConfigStatus(rawValue: mfgData[7]) ?? .unconfigured
+            let displayBoardID = displayBoardID(for: peripheral.identifier, advertisedBoardID: advertisedBoardID)
 
             let board = DiscoveredBoard(
                 id: peripheral.identifier,
                 peripheral: peripheral,
-                boardID: bid,
+                boardID: displayBoardID,
+                advertisedBoardID: advertisedBoardID,
                 deviceType: dtype,
                 firmwareVersion: "\(fwMajor).\(fwMinor)",
                 pixelCount: pixels,

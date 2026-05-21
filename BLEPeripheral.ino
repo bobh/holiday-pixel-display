@@ -19,7 +19,7 @@ static const char* CHAR_SAVE_CONFIG    = "19B10008-E8F2-537E-4F6C-D104768A1214";
 // ------------------------------------------------------------
 // Board identity & advertising configuration (Protocol §5)
 // ------------------------------------------------------------
-static const uint8_t BOARD_ID       = 0;     // 0 = MASTER, 1-99 for additional boards
+static const uint8_t BOARD_ID       = 1;     // 0 = MASTER, 1-99 for additional boards
 static const uint8_t DEVICE_TYPE    = 0x01;  // 0x01 = Nano 33 BLE
 static const uint8_t FW_VERSION     = 0x10;  // v1.0
 static const uint8_t PIXEL_COUNT    = 8;
