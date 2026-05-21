@@ -159,10 +159,9 @@ struct ControlView: View {
     private var saveSection: some View {
         Section {
             Button("Save & Next") {
-                bleManager.saveConfig()
-                bleManager.disconnect()
+                bleManager.saveConfig(disconnectOnSuccess: true)
             }
-            .disabled(!bleManager.isConnected)
+            .disabled(!bleManager.isConnected || bleManager.isSavingConfig)
         }
     }
 

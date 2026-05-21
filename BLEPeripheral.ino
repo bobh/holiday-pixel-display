@@ -63,13 +63,13 @@ static BLECharacteristic charColorPrimary(CHAR_COLOR_PRIMARY, BLERead | BLEWrite
 static BLECharacteristic charColorSecondary(CHAR_COLOR_SECONDARY, BLERead | BLEWrite, 4);
 static BLECharacteristic charFlags(CHAR_FLAGS, BLERead | BLEWrite, 1);
 static BLECharacteristic charAudioTrack(CHAR_AUDIO_TRACK, BLERead | BLEWrite, 1);
-static BLECharacteristic charSaveConfig(CHAR_SAVE_CONFIG, BLEWrite | BLENotify, 1);
+static BLECharacteristic charSaveConfig(CHAR_SAVE_CONFIG, BLERead | BLEWrite | BLENotify, 1);
 
 // Forward declarations
 static void applyConfig();
 static void notifyBattery();
 static void handleWrites();
-static void saveConfig();
+static bool saveConfig();
 
 void setupBLE() {
   if (!BLE.begin()) {
@@ -252,10 +252,12 @@ static void handleWrites() {
     uint8_t value;
     charSaveConfig.readValue(&value, 1);
     if (value == 1) {
-      saveConfig();             // Persist to FRAM
-      state = CONFIGURED;
-      setStatusLED(0, 255, 0); // GREEN — config saved
-      uint8_t ack = 1;
+      bool saved = saveConfig(); // Persist to FRAM and verify
+      uint8_t ack = saved ? 1 : 0;
+      if (saved) {
+        state = CONFIGURED;
+        setStatusLED(0, 255, 0); // GREEN — config saved
+      }
       charSaveConfig.writeValue(&ack, 1);
       // Advertising state byte updated on disconnect (central is still connected here)
     }
@@ -297,7 +299,7 @@ static void notifyBattery() {
 }
 
 // ------------------------------------------------------------
-// FRAM persistence — FM24CL16B at I2C address 0x50
+// FRAM persistence — FM24CL16B at I2C addresses 0x50-0x57
 // Layout:
 //   0x0000        : magic byte (0xA5 = valid config present)
 //   0x0001–0x000D : DisplayConfig struct (13 bytes)
@@ -310,23 +312,48 @@ static const uint16_t FRAM_MAGIC_ADDR  = 0x0000;
 static const uint16_t FRAM_CONFIG_ADDR = 0x0001;
 static const uint8_t  FRAM_MAGIC_BYTE  = 0xA5;
 
+static uint8_t framDeviceAddress(uint16_t addr) {
+  return FRAM_I2C_ADDR | ((addr >> 8) & 0x07);
+}
+
 static bool framWrite(uint16_t addr, const uint8_t* data, uint8_t len) {
-  Wire.beginTransmission(FRAM_I2C_ADDR);
-  Wire.write((addr >> 8) & 0xFF);
-  Wire.write(addr & 0xFF);
-  Wire.write(data, len);
-  return Wire.endTransmission() == 0;
+  while (len > 0) {
+    uint8_t deviceAddr = framDeviceAddress(addr);
+    uint8_t wordAddr = addr & 0xFF;
+    uint8_t chunkLen = min<uint8_t>(len, 256 - wordAddr);
+
+    Wire.beginTransmission(deviceAddr);
+    Wire.write(wordAddr);
+    Wire.write(data, chunkLen);
+    if (Wire.endTransmission() != 0) return false;
+
+    addr += chunkLen;
+    data += chunkLen;
+    len -= chunkLen;
+  }
+  return true;
 }
 
 static bool framRead(uint16_t addr, uint8_t* data, uint8_t len) {
-  Wire.beginTransmission(FRAM_I2C_ADDR);
-  Wire.write((addr >> 8) & 0xFF);
-  Wire.write(addr & 0xFF);
-  if (Wire.endTransmission(false) != 0) return false;
-  Wire.requestFrom(FRAM_I2C_ADDR, len);
-  for (uint8_t i = 0; i < len; i++) {
-    if (!Wire.available()) return false;
-    data[i] = Wire.read();
+  while (len > 0) {
+    uint8_t deviceAddr = framDeviceAddress(addr);
+    uint8_t wordAddr = addr & 0xFF;
+    uint8_t chunkLen = min<uint8_t>(len, 256 - wordAddr);
+
+    Wire.beginTransmission(deviceAddr);
+    Wire.write(wordAddr);
+    if (Wire.endTransmission(false) != 0) return false;
+
+    uint8_t received = Wire.requestFrom(deviceAddr, chunkLen);
+    if (received != chunkLen) return false;
+    for (uint8_t i = 0; i < chunkLen; i++) {
+      if (!Wire.available()) return false;
+      data[i] = Wire.read();
+    }
+
+    addr += chunkLen;
+    data += chunkLen;
+    len -= chunkLen;
   }
   return true;
 }
@@ -338,16 +365,29 @@ bool framHasValidConfig() {
 }
 
 void loadConfigFromFRAM() {
+  Wire.begin();
   if (!framRead(FRAM_CONFIG_ADDR, (uint8_t*)&gConfig, (uint8_t)sizeof(gConfig))) return;
   applyConfig();
 }
 
-static void saveConfig() {
+static bool saveConfig() {
   // Re-initialize Wire before FRAM access. On NRF52840, BLE.begin() can
   // leave the I2C peripheral in a state that silently drops transactions.
   // Calling Wire.begin() here is safe — it reinitializes without side effects.
   Wire.begin();
-  framWrite(FRAM_CONFIG_ADDR, (uint8_t*)&gConfig, (uint8_t)sizeof(gConfig));
+
+  if (!framWrite(FRAM_CONFIG_ADDR, (uint8_t*)&gConfig, (uint8_t)sizeof(gConfig))) {
+    return false;
+  }
   uint8_t magic = FRAM_MAGIC_BYTE;
-  framWrite(FRAM_MAGIC_ADDR, &magic, 1);
+  if (!framWrite(FRAM_MAGIC_ADDR, &magic, 1)) {
+    return false;
+  }
+
+  uint8_t verifyMagic = 0;
+  DisplayConfig verifyConfig = {};
+  if (!framRead(FRAM_MAGIC_ADDR, &verifyMagic, 1)) return false;
+  if (verifyMagic != FRAM_MAGIC_BYTE) return false;
+  if (!framRead(FRAM_CONFIG_ADDR, (uint8_t*)&verifyConfig, (uint8_t)sizeof(verifyConfig))) return false;
+  return memcmp(&verifyConfig, &gConfig, sizeof(gConfig)) == 0;
 }

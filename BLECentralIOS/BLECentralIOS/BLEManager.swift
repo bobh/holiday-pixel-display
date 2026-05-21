@@ -267,11 +267,13 @@ final class BLEManager: NSObject {
         connectedPeripheral?.writeValue(Data(bytes: &value, count: 4), for: char, type: .withResponse)
     }
 
-    func saveConfig() {
+    func saveConfig(disconnectOnSuccess: Bool = false) {
         guard let char = charSaveConfig else { return }
         var value: UInt8 = 1
+        isSavingConfig = true
+        disconnectAfterSaveAck = disconnectOnSuccess
+        connectionStatus = "Saving configuration..."
         connectedPeripheral?.writeValue(Data(bytes: &value, count: 1), for: char, type: .withResponse)
-        markCurrentBoardConfigured()
     }
 
     // MARK: - Helpers
@@ -508,6 +510,9 @@ extension BLEManager: CBPeripheralDelegate {
                 if char.uuid == HolidayBLE.batteryUUID && char.properties.contains(.notify) {
                     peripheral.setNotifyValue(true, for: char)
                 }
+                if char.uuid == HolidayBLE.saveConfigUUID && char.properties.contains(.notify) {
+                    peripheral.setNotifyValue(true, for: char)
+                }
             }
 
             connectionStatus = "Ready"
@@ -541,8 +546,36 @@ extension BLEManager: CBPeripheralDelegate {
                 if data.count >= 2 {
                     self.batteryMv = UInt16(data[0]) | (UInt16(data[1]) << 8)
                 }
+            case HolidayBLE.saveConfigUUID:
+                guard let ack = data.first else { return }
+                self.isSavingConfig = false
+                if ack == 1 {
+                    self.connectionStatus = "Configuration saved"
+                    self.markCurrentBoardConfigured()
+                    if self.disconnectAfterSaveAck {
+                        self.disconnectAfterSaveAck = false
+                        self.disconnect()
+                    }
+                } else {
+                    self.disconnectAfterSaveAck = false
+                    self.connectionStatus = "Save failed: FRAM write/readback failed"
+                }
             default:
                 break
+            }
+        }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral,
+                                didWriteValueFor characteristic: CBCharacteristic,
+                                error: Error?) {
+        let characteristicUUID = characteristic.uuid
+        Task { @MainActor in
+            guard characteristicUUID == HolidayBLE.saveConfigUUID else { return }
+            if let error = error {
+                self.isSavingConfig = false
+                self.disconnectAfterSaveAck = false
+                self.connectionStatus = "Save write failed: \(error.localizedDescription)"
             }
         }
     }

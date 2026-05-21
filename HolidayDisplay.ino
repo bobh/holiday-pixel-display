@@ -1,6 +1,5 @@
 //Holiday Lights Test Harness
 
-
 #include <Wire.h>
 #include <NeoPixelBus.h>
 /*
@@ -67,6 +66,7 @@ static const float    VBATT_CUTOFF      = 3.00f;      // Hard cutoff (V)
 static const float    VBATT_WARNING     = 3.20f;      // Soft warning threshold (V)
 static const float    VRAIL_PRESENT_V   = 1.60f;      // VA1 > 1.60V → Vrail > 3.2V = AC present
 static const float    VRAIL_HEALTHY_V   = 2.25f;      // VA1 > 2.25V → Vrail > 4.5V = AC healthy
+static const float    VBATT_PRESENT_MIN = 0.50f;      // Below this, no battery is attached/sensed
 static const float    TTE_WARNING_SECS  = 300.0f;     // 5-minute Time-To-Empty warning
 static const uint8_t  REGRESSION_N      = 5;          // Sliding window sample count
 static const float    ADC_TO_VOLTS      = (3.3f / 4095.0f) * 2.0f; // 12-bit, ÷2 divider
@@ -157,84 +157,35 @@ public:
         {
             case Effect::Fire:
             {
-                // PURE RGB FIRE FLICKER (no white channel)
-                // -----------------------------------------
-                // Slow thermal drift
-                fireDriftPhase += fireSlowDriftRate;
-                if (fireDriftPhase > 2.0f * PI) {
-                    fireDriftPhase -= 2.0f * PI;
-                }
-
-                float drift = (sin(fireDriftPhase) + 1.0f) * 0.5f;   // 0–1
-                float driftScale = 0.75f + drift * 0.25f;            // 0.75–1.00
-
-                // Fast micro-flicker
-                float flicker = 1.0f - (random(0, 1000) / 1000.0f) * fireFlickerStrength;
-
-                // Combined intensity
-                float intensity = driftScale * flicker;
-
-                // Fire color profile (RGB only)
-                uint8_t r = static_cast<uint8_t>(fireBaseRed   * intensity);
-                uint8_t g = static_cast<uint8_t>(fireBaseGreen * intensity);
-                uint8_t b = 0;
-
-                // Occasional red surge (flame tongues)
-                if (random(0, 100) < 10) {   // ~10% chance each frame
-                    uint8_t surge = static_cast<uint8_t>(random(30, 80));
-                    r = (r > 255 - surge) ? 255 : r + surge;
-                }
-
-                // White channel disabled for this effect
-                uint8_t w = 0;
-
-                RgbwColor color(r, g, b, w);
-                RgbwColor scaled = scaleBrightness(color);
-
-                for (uint16_t i = 0; i < ledCount; i++) {
-                    strip.SetPixelColor(i, scaled);
-                }
-
-                strip.Show();
+                renderFire();
                 break;
             }
 
             case Effect::Candle:
+            case Effect::LOTR_ColdWhite:
+            case Effect::LOTR_Palantir:
+            case Effect::LOTR_ManyColor:
             {
-                // Placeholder for future candle effect
-                // For now, reuse Fire behavior or leave dark
-                break;
-            }
-
-            case Effect::Ember:
-            {
-                // Placeholder for future ember effect
+                // Fall back visibly until these effects are implemented.
+                renderFire();
                 break;
             }
 
             case Effect::Sparkle:
             {
-                // Placeholder for future sparkle effect
+                renderSparkle();
+                break;
+            }
+
+            case Effect::Ember:
+            {
+                renderEmber();
                 break;
             }
 
             case Effect::WarmWhite:
             {
-                // Slow sine-wave breathing: 4-second period.
-                // W channel dominant — first effect to exercise the white LED.
-                float phase  = (millis() % 4000) / 4000.0f;
-                float breath = (sinf(phase * 2.0f * PI - PI / 2.0f) + 1.0f) * 0.5f; // 0.0–1.0
-
-                uint8_t w = static_cast<uint8_t>(breath * 220); // W dominant
-                uint8_t r = static_cast<uint8_t>(breath * 35);  // slight warm tint
-
-                RgbwColor color(r, 0, 0, w);
-                RgbwColor scaled = scaleBrightness(color);
-
-                for (uint16_t i = 0; i < ledCount; i++) {
-                    strip.SetPixelColor(i, scaled);
-                }
-                strip.Show();
+                renderWarmWhite();
                 break;
             }
         }
@@ -315,6 +266,93 @@ private:
         }
     }
 
+    void renderFire()
+    {
+        fireDriftPhase += fireSlowDriftRate;
+        if (fireDriftPhase > 2.0f * PI) {
+            fireDriftPhase -= 2.0f * PI;
+        }
+
+        float drift = (sin(fireDriftPhase) + 1.0f) * 0.5f;
+        float driftScale = 0.60f + drift * 0.40f;
+
+        for (uint16_t i = 0; i < ledCount; i++) {
+            float flicker = random(350, 1000) / 1000.0f;
+            float intensity = driftScale * flicker;
+            uint8_t r = static_cast<uint8_t>(240.0f * intensity);
+            uint8_t g = static_cast<uint8_t>(95.0f * intensity);
+
+            if (random(0, 100) < 18) {
+                r = min<uint8_t>(255, r + random(30, 90));
+                g = min<uint8_t>(130, g + random(12, 45));
+            }
+
+            strip.SetPixelColor(i, scaleBrightness(RgbwColor(r, g, 0, 0)));
+        }
+        strip.Show();
+    }
+
+    void renderSparkle()
+    {
+        for (uint16_t i = 0; i < ledCount; i++) {
+            strip.SetPixelColor(i, RgbwColor(0, 0, 0, 0));
+        }
+
+        if (random(0, 100) < 45) {
+            uint16_t pixel = random(0, ledCount);
+            strip.SetPixelColor(pixel, scaleBrightness(RgbwColor(255, 220, 180, 80)));
+        }
+        if (random(0, 100) < 15) {
+            uint16_t pixel = random(0, ledCount);
+            strip.SetPixelColor(pixel, scaleBrightness(RgbwColor(120, 170, 255, 30)));
+        }
+
+        strip.Show();
+    }
+
+    void renderEmber()
+    {
+        fireDriftPhase += fireSlowDriftRate * 0.45f;
+        if (fireDriftPhase > 2.0f * PI) {
+            fireDriftPhase -= 2.0f * PI;
+        }
+
+        float breath = (sin(fireDriftPhase) + 1.0f) * 0.5f;
+        float baseGlow = 0.08f + breath * 0.18f;
+
+        for (uint16_t i = 0; i < ledCount; i++) {
+            float pixelVariation = random(55, 105) / 100.0f;
+            float intensity = baseGlow * pixelVariation;
+
+            uint8_t r = static_cast<uint8_t>(170.0f * intensity);
+            uint8_t g = static_cast<uint8_t>(12.0f * intensity);
+
+            if (random(0, 100) < 2) {
+                r = min<uint8_t>(90, r + random(18, 45));
+                g = min<uint8_t>(18, g + random(2, 8));
+            }
+
+            strip.SetPixelColor(i, scaleBrightness(RgbwColor(r, g, 0, 0)));
+        }
+
+        strip.Show();
+    }
+
+    void renderWarmWhite()
+    {
+        float phase  = (millis() % 5000) / 5000.0f;
+        float breath = (sinf(phase * 2.0f * PI - PI / 2.0f) + 1.0f) * 0.5f;
+
+        uint8_t w = static_cast<uint8_t>(30 + breath * 210);
+        uint8_t r = static_cast<uint8_t>(8 + breath * 24);
+
+        RgbwColor scaled = scaleBrightness(RgbwColor(r, 0, 0, w));
+        for (uint16_t i = 0; i < ledCount; i++) {
+            strip.SetPixelColor(i, scaled);
+        }
+        strip.Show();
+    }
+
     // --------------------------------------------------------
     // Utility: Brightness scaling
     // --------------------------------------------------------
@@ -354,8 +392,18 @@ private:
 
     bool isValidEffect(Effect e)
     {
-        uint8_t v = static_cast<uint8_t>(e);
-        return v <= static_cast<uint8_t>(Effect::LOTR_ManyColor);
+        switch (e) {
+            case Effect::Fire:
+            case Effect::Candle:
+            case Effect::Ember:
+            case Effect::Sparkle:
+            case Effect::WarmWhite:
+            case Effect::LOTR_ColdWhite:
+            case Effect::LOTR_Palantir:
+            case Effect::LOTR_ManyColor:
+                return true;
+        }
+        return false;
     }
 };
 
@@ -400,6 +448,7 @@ void setupPower() {
     analogReadResolution(12);
     pinMode(PIN_BOOST_EN, OUTPUT);
     digitalWrite(PIN_BOOST_EN, HIGH);  // EN=HIGH: boost converter ON at startup
+    lastPowerSample = millis() - POWER_SAMPLE_MS;  // force the first sample immediately
 }
 
 void updatePower() {
@@ -453,6 +502,13 @@ void updatePower() {
     // Cutoff latch is permanent until hardware reset
     if (cutoffLatched) {
         setPowerStatus(PowerStatus::BATTERY_CUTOFF);
+        return;
+    }
+
+    if (vbatt < VBATT_PRESENT_MIN) {
+        digitalWrite(PIN_BOOST_EN, LOW);
+        ledLocked = false;
+        setPowerStatus(PowerStatus::HARDWARE_FAULT);
         return;
     }
 
@@ -513,6 +569,8 @@ void setup()
     // Start with all LEDs off before state is determined
     setStatusLED(0, 0, 0);
 
+    setupPower();     // Configure ADC resolution and D5 boost enable before power decisions
+    updatePower();    // Resolve AC/battery state immediately instead of waiting 15 seconds
     display.begin();  // Clears and blanks SK6812 pixels
 
     // Check FRAM for a previously saved configuration.
@@ -529,7 +587,6 @@ void setup()
     }
 
     setupBLE();
-    setupPower();  // Configure ADC resolution and D5 boost enable
 }
 
 // ------------------------------------------------------------

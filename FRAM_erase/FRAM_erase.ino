@@ -8,20 +8,23 @@
 static const uint8_t  FRAM_ADDR  = 0x50;
 static const uint8_t  MAGIC_BYTE = 0xA5;
 
-static void framWriteByte(uint16_t addr, uint8_t val) {
-  Wire.beginTransmission(FRAM_ADDR);
-  Wire.write((addr >> 8) & 0xFF);
+static uint8_t framDeviceAddress(uint16_t addr) {
+  return FRAM_ADDR | ((addr >> 8) & 0x07);
+}
+
+static bool framWriteByte(uint16_t addr, uint8_t val) {
+  Wire.beginTransmission(framDeviceAddress(addr));
   Wire.write(addr & 0xFF);
   Wire.write(val);
-  Wire.endTransmission();
+  return Wire.endTransmission() == 0;
 }
 
 static uint8_t framReadByte(uint16_t addr) {
-  Wire.beginTransmission(FRAM_ADDR);
-  Wire.write((addr >> 8) & 0xFF);
+  uint8_t deviceAddr = framDeviceAddress(addr);
+  Wire.beginTransmission(deviceAddr);
   Wire.write(addr & 0xFF);
   if (Wire.endTransmission(false) != 0) return 0xFF;
-  Wire.requestFrom(FRAM_ADDR, (uint8_t)1);
+  Wire.requestFrom(deviceAddr, (uint8_t)1);
   return Wire.available() ? Wire.read() : 0xFF;
 }
 
@@ -61,7 +64,10 @@ void setup() {
   // Erase: zero the magic byte so firmware boots UNCONFIGURED
   Serial.println();
   Serial.println(F("Erasing magic byte..."));
-  framWriteByte(0x0000, 0x00);
+  if (!framWriteByte(0x0000, 0x00)) {
+    Serial.println(F("Erase write FAILED — no I2C ACK."));
+    return;
+  }
   uint8_t verify = framReadByte(0x0000);
   if (verify == 0x00) {
     Serial.println(F("Erase OK — board will boot UNCONFIGURED on next power cycle."));
